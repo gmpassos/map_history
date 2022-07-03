@@ -50,13 +50,18 @@ class _MapEntryValue<K, V> extends _MapEntry<K, V> {
 /// A [Map] implementation with history support, including
 /// [rollback] operations.
 class MapHistory<K, V> implements Map<K, V> {
-  MapHistory();
+  MapHistory() {
+    _setInitTime();
+  }
 
   MapHistory.fromEntries(Iterable<MapEntry<K, V>> entries) {
+    _setInitTime();
     addEntries(entries);
   }
 
   MapHistory.fromIterables(Iterable<K> keys, Iterable<V> values) {
+    _setInitTime();
+
     var itrKeys = keys.iterator;
     var itrValues = values.iterator;
 
@@ -65,11 +70,19 @@ class MapHistory<K, V> implements Map<K, V> {
     }
   }
 
-  MapHistory.from(Map<K, V> map) {
-    addAll(map);
+  MapHistory.from(Map map) {
+    _setInitTime();
+
+    if (map is Map<K, V>) {
+      addAll(map);
+    } else {
+      addAll(map.cast<K, V>());
+    }
   }
 
   MapHistory.of(Map<K, V> map) {
+    _setInitTime();
+
     addAll(map);
   }
 
@@ -91,7 +104,11 @@ class MapHistory<K, V> implements Map<K, V> {
   }
 
   /// The initial [DateTime] of this instance. All operations are after this [DateTime].
-  late final DateTime initialTime = currentTime();
+  late final DateTime initialTime;
+
+  void _setInitTime() {
+    initialTime = currentTime();
+  }
 
   DateTime? _lastTime;
 
@@ -294,7 +311,7 @@ class MapHistory<K, V> implements Map<K, V> {
     for (var values in _entries.values) {
       for (var e in values) {
         if (e.version == targetVersion) {
-          return e.asMapEntry;
+          return e.isDeleted ? null : e.asMapEntry;
         }
       }
     }
@@ -304,7 +321,11 @@ class MapHistory<K, V> implements Map<K, V> {
 
   /// Returns the version operation for the [targetTime],
   /// or the nearest version for [targetTime].
-  int? findOperationVersionByTime(DateTime targetTime) {
+  int findOperationVersionByTime(DateTime targetTime) {
+    if (targetTime.compareTo(initialTime) < 0) {
+      return 0;
+    }
+
     _MapEntry<K, V>? best;
 
     for (var values in _entries.values) {
@@ -320,7 +341,7 @@ class MapHistory<K, V> implements Map<K, V> {
       }
     }
 
-    return best?.version;
+    return best?.version ?? 0;
   }
 
   /// Rollbacks to the operation of [targetVersion].

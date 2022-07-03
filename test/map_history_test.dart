@@ -132,6 +132,13 @@ void main() {
       expect(m.keys, equals([101, 102, 103, 104]));
       expect(m.values, equals(['A', 'b', 'c', 'd']));
 
+      m.putIfAbsent(103, () => 'C');
+
+      expect(m.length, equals(4));
+      expect(m.version, equals(5));
+      expect(m.keys, equals([101, 102, 103, 104]));
+      expect(m.values, equals(['A', 'b', 'c', 'd']));
+
       ver = m.version;
 
       expect(m.containsKey(101), isTrue);
@@ -171,6 +178,122 @@ void main() {
           equals({1010: 'A.', 1020: 'b.', 1030: 'c.', 1040: 'd.'}));
 
       expect(m.toString(), equals('{101: A, 102: b, 103: c, 104: d}'));
+
+      m.putIfAbsent(105, () => 'e');
+
+      expect(m.length, equals(5));
+      expect(m.version, equals(6));
+      expect(m.keys, equals([101, 102, 103, 104, 105]));
+      expect(m.values, equals(['A', 'b', 'c', 'd', 'e']));
+
+      expect(m, equals({101: 'A', 102: 'b', 103: 'c', 104: 'd', 105: 'e'}));
+
+      m.addAll({106: 'f', 107: 'g'});
+
+      expect(
+          m,
+          equals({
+            101: 'A',
+            102: 'b',
+            103: 'c',
+            104: 'd',
+            105: 'e',
+            106: 'f',
+            107: 'g'
+          }));
+
+      ver = m.version;
+      var lastTime = m.lastTime;
+
+      m.removeWhere((key, value) => key >= 105);
+
+      expect(m, equals({101: 'A', 102: 'b', 103: 'c', 104: 'd'}));
+
+      expect(m.findOperationEntryByVersion(ver)?.equals(MapEntry(107, 'g')),
+          isTrue);
+
+      expect(m.findOperationVersionByTime(lastTime), equals(ver));
+      expect(m.findOperationVersionByTime(lastTime.add(Duration(seconds: 1))),
+          equals(m.version));
+
+      expect(
+          m.findOperationVersionByTime(
+              lastTime.subtract(Duration(minutes: 10))),
+          equals(0));
+
+      m.rollback(m.version);
+
+      expect(m, equals({101: 'A', 102: 'b', 103: 'c', 104: 'd'}));
+
+      expect(m.toMap(), equals({101: 'A', 102: 'b', 103: 'c', 104: 'd'}));
+      expect(m.toMap(), isNot(isA<MapHistory<int, String>>()));
+
+      expect(MapHistory.of(m.toMap()),
+          equals({101: 'A', 102: 'b', 103: 'c', 104: 'd'}));
+      expect(MapHistory<int, String>.from(m.toMap()),
+          equals({101: 'A', 102: 'b', 103: 'c', 104: 'd'}));
+      expect(MapHistory<int, String>.from(Map<Object, Object>.from(m)),
+          equals({101: 'A', 102: 'b', 103: 'c', 104: 'd'}));
+
+      expect(MapHistory<int, String>.from(m.cast<Object, Object>()),
+          equals({101: 'A', 102: 'b', 103: 'c', 104: 'd'}));
+
+      expect(
+          () => m.cast<String, String>().toString(), throwsA(isA<TypeError>()));
+
+      expect(MapHistory.fromEntries(m.toMap().entries),
+          equals({101: 'A', 102: 'b', 103: 'c', 104: 'd'}));
+
+      expect(MapHistory.fromIterables([1001, 1002], ['A', 'B']),
+          equals({1001: 'A', 1002: 'B'}));
+
+      m.rollback(ver);
+
+      expect(
+          m,
+          equals({
+            101: 'A',
+            102: 'b',
+            103: 'c',
+            104: 'd',
+            105: 'e',
+            106: 'f',
+            107: 'g'
+          }));
+
+      m.updateAll((key, value) => key >= 105 ? value.toUpperCase() : value);
+
+      var str = StringBuffer();
+      m.forEach((key, value) => str.write('$key:$value '));
+      expect(
+          str.toString(), equals('101:A 102:b 103:c 104:d 105:E 106:F 107:G '));
+
+      m.update(102, (value) => '$value.');
+
+      m.update(108, (value) => '$value.', ifAbsent: () => 'x');
+
+      expect(
+          m,
+          equals({
+            101: 'A',
+            102: 'b.',
+            103: 'c',
+            104: 'd',
+            105: 'E',
+            106: 'F',
+            107: 'G',
+            108: 'x'
+          }));
+
+      m.purgeAll();
+
+      expect(m.isEmpty, isTrue);
+      expect(m.isNotEmpty, isFalse);
+      expect(m.length, equals(0));
+      expect(m.version, equals(0));
+      expect(m.keys, equals([]));
+      expect(m.values, equals([]));
+      expect(m, equals({}));
     });
   });
 }
