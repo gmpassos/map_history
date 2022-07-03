@@ -1,0 +1,15 @@
+name: map_history
+description: A Map implementation with history and rollback support for entries, keys and values.
+version: 1.0.0
+homepage: https://github.com/gmpassos/map_history
+
+environment:
+  sdk: '>=2.15.0 <3.0.0'
+
+dependencies:
+   collection: ^1.16.0
+   path: ^1.8.0
+
+dev_dependencies:
+  lints: ^2.0.0
+  test: ^1.16.0
