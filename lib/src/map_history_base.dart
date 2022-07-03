@@ -331,12 +331,16 @@ class MapHistory<K, V> implements Map<K, V> {
     for (var values in _entries.values) {
       for (var e in values) {
         var cmp = e.time.compareTo(targetTime);
-        if (cmp < 0) {
-          if (best == null || best.time.compareTo(e.time) < 0) {
+        if (cmp <= 0) {
+          if (best == null) {
             best = e;
+          } else {
+            var bestTimeCmp = best.time.compareTo(e.time);
+            if (bestTimeCmp < 0 ||
+                (bestTimeCmp == 0 && best.version < e.version)) {
+              best = e;
+            }
           }
-        } else if (cmp == 0) {
-          return e.version;
         }
       }
     }

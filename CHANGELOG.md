@@ -1,6 +1,6 @@
 ## 1.0.1
 
-- Minor fix.
+- Minor fixes.
 - Improved test coverage to +90%
 
 ## 1.0.0

@@ -181,12 +181,24 @@ void main() {
 
       m.putIfAbsent(105, () => 'e');
 
+      ver = m.version;
+      var lastTime = m.lastTime;
+
       expect(m.length, equals(5));
       expect(m.version, equals(6));
       expect(m.keys, equals([101, 102, 103, 104, 105]));
       expect(m.values, equals(['A', 'b', 'c', 'd', 'e']));
 
       expect(m, equals({101: 'A', 102: 'b', 103: 'c', 104: 'd', 105: 'e'}));
+
+      expect(m.findOperationVersionByTime(lastTime), equals(ver));
+      expect(m.findOperationVersionByTime(lastTime.add(Duration(seconds: 1))),
+          equals(m.version));
+
+      expect(
+          m.findOperationVersionByTime(
+              lastTime.subtract(Duration(minutes: 10))),
+          equals(0));
 
       m.addAll({106: 'f', 107: 'g'});
 
@@ -203,7 +215,6 @@ void main() {
           }));
 
       ver = m.version;
-      var lastTime = m.lastTime;
 
       m.removeWhere((key, value) => key >= 105);
 
@@ -211,15 +222,6 @@ void main() {
 
       expect(m.findOperationEntryByVersion(ver)?.equals(MapEntry(107, 'g')),
           isTrue);
-
-      expect(m.findOperationVersionByTime(lastTime), equals(ver));
-      expect(m.findOperationVersionByTime(lastTime.add(Duration(seconds: 1))),
-          equals(m.version));
-
-      expect(
-          m.findOperationVersionByTime(
-              lastTime.subtract(Duration(minutes: 10))),
-          equals(0));
 
       m.rollback(m.version);
 
