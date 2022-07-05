@@ -115,7 +115,12 @@ class MapHistory<K, V> implements Map<K, V> {
   /// The last operation [DateTime].
   late final DateTime lastTime = _lastTime ?? initialTime;
 
+  int _zeroVersion = 0;
   int _version = 0;
+
+  /// The minimal [version] that a [rollback] can target.
+  /// See [consolidate].
+  int get baseVersion => _zeroVersion == _version ? _version : _zeroVersion + 1;
 
   /// The current version of this instance.
   /// Every operation increments the version number.
@@ -322,8 +327,8 @@ class MapHistory<K, V> implements Map<K, V> {
   /// Returns the version operation for the [targetTime],
   /// or the nearest version for [targetTime].
   int findOperationVersionByTime(DateTime targetTime) {
-    if (targetTime.compareTo(initialTime) < 0) {
-      return 0;
+    if (targetTime.compareTo(initialTime) < _zeroVersion) {
+      return _zeroVersion;
     }
 
     _MapEntry<K, V>? best;
@@ -345,12 +350,12 @@ class MapHistory<K, V> implements Map<K, V> {
       }
     }
 
-    return best?.version ?? 0;
+    return best?.version ?? _zeroVersion;
   }
 
   /// Rollbacks to the operation of [targetVersion].
   MapEntry<K, V>? rollback(int targetVersion) {
-    if (targetVersion <= 0) {
+    if (targetVersion <= _zeroVersion) {
       _clearAll();
       return null;
     } else if (targetVersion == version) {
@@ -377,6 +382,10 @@ class MapHistory<K, V> implements Map<K, V> {
           return true;
         }
       });
+
+      if (values.length == 1 && values.first.isDeleted) {
+        values.clear();
+      }
     }
 
     _entries.removeWhere((key, values) => values.isEmpty);
@@ -397,13 +406,57 @@ class MapHistory<K, V> implements Map<K, V> {
   void _clearAll() {
     _entries.clear();
     _size = 0;
-    _version = 0;
+    _version = _zeroVersion;
     _lastTime = null;
   }
 
   /// Remove all entries and all history entries.
   void purgeAll() {
     _clearAll();
+  }
+
+  /// Removes all history prior to [targetBaseVersion] and returns the consolidated [baseVersion].
+  /// After the operation it won't allow a [rollback] to a version prior to [targetBaseVersion].
+  int consolidate(int targetBaseVersion) {
+    if (targetBaseVersion <= _zeroVersion) {
+      return baseVersion;
+    } else if (targetBaseVersion > version) {
+      var ver = version;
+      _clearAll();
+      _zeroVersion = _version = ver;
+      return baseVersion;
+    }
+
+    var minimalVersion = version;
+
+    for (var values in _entries.values) {
+      while (values.length > 2 && values.first.version < targetBaseVersion) {
+        values.removeAt(0);
+      }
+
+      if (values.length == 2 && values.last.version < targetBaseVersion) {
+        values.removeAt(0);
+      }
+
+      if (values.length == 1 && values.first.isDeleted) {
+        values.clear();
+      } else {
+        assert(values.isNotEmpty);
+
+        var ver = values.first.version;
+        if (ver < minimalVersion) {
+          minimalVersion = ver;
+        }
+      }
+    }
+
+    _entries.removeWhere((key, values) => values.isEmpty);
+
+    _computeSize();
+
+    _zeroVersion = minimalVersion - 1;
+
+    return baseVersion;
   }
 
   @override

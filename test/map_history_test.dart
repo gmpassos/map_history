@@ -9,6 +9,7 @@ void main() {
       expect(m.isNotEmpty, isFalse);
       expect(m.length, equals(0));
       expect(m.version, equals(0));
+      expect(m.baseVersion, equals(0));
       expect(m.keys, equals([]));
       expect(m.values, equals([]));
 
@@ -24,6 +25,7 @@ void main() {
       expect(m.isNotEmpty, isTrue);
       expect(m.length, equals(1));
       expect(m.version, equals(1));
+      expect(m.baseVersion, equals(1));
       expect(m.keys, equals([101]));
       expect(m.values, equals(['a']));
 
@@ -36,6 +38,7 @@ void main() {
       expect(m.isNotEmpty, isTrue);
       expect(m.length, equals(2));
       expect(m.version, equals(2));
+      expect(m.baseVersion, equals(1));
       expect(m.keys, equals([101, 102]));
       expect(m.values, equals(['a', 'b']));
 
@@ -49,6 +52,7 @@ void main() {
       expect(m.isNotEmpty, isTrue);
       expect(m.length, equals(2));
       expect(m.version, equals(3));
+      expect(m.baseVersion, equals(1));
       expect(m.keys, equals([101, 102]));
       expect(m.values, equals(['A', 'b']));
 
@@ -272,6 +276,8 @@ void main() {
 
       m.update(102, (value) => '$value.');
 
+      expect(() => m.update(108, (value) => '$value.'), throwsArgumentError);
+
       m.update(108, (value) => '$value.', ifAbsent: () => 'x');
 
       expect(
@@ -287,15 +293,86 @@ void main() {
             108: 'x'
           }));
 
+      ver = m.version;
+
+      expect(m.consolidate(-1), equals(1));
+      expect(m.baseVersion, equals(1));
+
+      expect(m.consolidate(ver), equals(9));
+      expect(m.baseVersion, equals(9));
+
+      expect(
+          m,
+          equals({
+            101: 'A',
+            102: 'b.',
+            103: 'c',
+            104: 'd',
+            105: 'E',
+            106: 'F',
+            107: 'G',
+            108: 'x'
+          }));
+
+      expect(m.consolidate(ver + 1), equals(ver));
+      expect(m.baseVersion, equals(ver));
+
       m.purgeAll();
 
       expect(m.isEmpty, isTrue);
       expect(m.isNotEmpty, isFalse);
       expect(m.length, equals(0));
-      expect(m.version, equals(0));
+      expect(m.version, equals(17));
       expect(m.keys, equals([]));
       expect(m.values, equals([]));
       expect(m, equals({}));
+    });
+
+    test('rollback + consolidate', () {
+      var m = MapHistory<int, String>.fromIterables([1, 3, 2], ['a', 'c', 'b']);
+
+      expect(m.isEmpty, isFalse);
+      expect(m.isNotEmpty, isTrue);
+      expect(m.length, equals(3));
+      expect(m.version, equals(3));
+      expect(m.baseVersion, equals(1));
+      expect(m, equals({1: 'a', 2: 'b', 3: 'c'}));
+
+      expect(m.consolidate(m.version), equals(1));
+      expect(m, equals({1: 'a', 2: 'b', 3: 'c'}));
+
+      m[2] = 'b.';
+      expect(m, equals({1: 'a', 2: 'b.', 3: 'c'}));
+
+      m[2] = 'B';
+      expect(m, equals({1: 'a', 2: 'B', 3: 'c'}));
+
+      var ver = m.version;
+
+      m.remove(2);
+      expect(m, equals({1: 'a', 3: 'c'}));
+
+      expect(m.rollback(m.version + 1), isNull);
+
+      m.rollback(ver);
+      expect(m, equals({1: 'a', 2: 'B', 3: 'c'}));
+
+      m.remove(3);
+      m[1] = 'A';
+      expect(m, equals({1: 'A', 2: 'B'}));
+
+      expect(m.rollback(m.version)?.equals(MapEntry(1, 'A')), isTrue);
+
+      expect(m.consolidate(ver), equals(1));
+      expect(m, equals({1: 'A', 2: 'B'}));
+
+      m.rollback(ver);
+      expect(m, equals({1: 'a', 2: 'B', 3: 'c'}));
+
+      expect(m.rollback(m.version)?.equals(MapEntry(2, 'B')), isTrue);
+
+      expect(m.rollback(m.baseVersion - 1), isNull);
+      expect(m.isEmpty, isTrue);
     });
   });
 }

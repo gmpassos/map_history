@@ -1,3 +1,7 @@
+## 1.0.2
+
+- Added `consolidate` and `baseVersion`.
+
 ## 1.0.1
 
 - Minor fixes.
