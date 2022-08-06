@@ -396,7 +396,7 @@ class MapHistory<K, V> implements Map<K, V> {
 
     if (foundEntry != null) {
       _version = foundEntry.version;
-      return foundEntry.asMapEntry;
+      return foundEntry.isDeleted ? null : foundEntry.asMapEntry;
     } else {
       _clearAll();
       return null;

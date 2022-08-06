@@ -1,3 +1,7 @@
+## 1.0.3
+
+- Fix minor bug when rollback target version contains a deleted entry.
+
 ## 1.0.2
 
 - Added `consolidate` and `baseVersion`.
