@@ -16,7 +16,7 @@ abstract class _MapEntry<K, V> {
 }
 
 class _MapEntryDeleted<K, V> extends _MapEntry<K, V> {
-  _MapEntryDeleted(int version, DateTime time) : super(version, time);
+  _MapEntryDeleted(super.version, super.time);
 
   @override
   bool get isDeleted => true;
