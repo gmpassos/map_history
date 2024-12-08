@@ -1,3 +1,7 @@
+## 1.0.6
+
+- `README.md`: Fix CI badge.
+
 ## 1.0.5
 
 - test: ^1.25.12

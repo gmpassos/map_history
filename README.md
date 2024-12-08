@@ -3,7 +3,7 @@
 [![pub package](https://img.shields.io/pub/v/map_history.svg?logo=dart&logoColor=00b9fc)](https://pub.dartlang.org/packages/map_history)
 [![Null Safety](https://img.shields.io/badge/null-safety-brightgreen)](https://dart.dev/null-safety)
 [![Codecov](https://img.shields.io/codecov/c/github/gmpassos/map_history)](https://app.codecov.io/gh/gmpassos/map_history)
-[![CI](https://img.shields.io/github/workflow/status/gmpassos/map_history/Dart%20CI/master?logo=github-actions&logoColor=white)](https://github.com/gmpassos/map_history/actions)
+[![Dart CI](https://github.com/gmpassos/map_history/actions/workflows/dart.yml/badge.svg?branch=master)](https://github.com/gmpassos/map_history/actions/workflows/dart.yml)
 [![GitHub Tag](https://img.shields.io/github/v/tag/gmpassos/map_history?logo=git&logoColor=white)](https://github.com/gmpassos/map_history/releases)
 [![New Commits](https://img.shields.io/github/commits-since/gmpassos/map_history/latest?logo=git&logoColor=white)](https://github.com/gmpassos/map_history/network)
 [![Last Commits](https://img.shields.io/github/last-commit/gmpassos/map_history?logo=git&logoColor=white)](https://github.com/gmpassos/map_history/commits/master)
