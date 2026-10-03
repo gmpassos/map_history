@@ -1,3 +1,17 @@
+## 1.0.7
+
+- `consolidate` now visits only the keys changed since they were last
+  consolidated, instead of every key: O(changed keys), not O(map size).
+  - The minimal first version (for `baseVersion`) is kept between calls, and
+    only recomputed over every key when the key holding it is consolidated.
+  - Results are unchanged: a new randomized test checks `consolidate` and
+    `rollback` against the previous algorithm.
+  - Measured in `bones_api`'s `DBSQLMemoryAdapter`, which consolidates its
+    tables on every commit: up to 12x faster writes on a table of a few
+    thousand rows.
+- `update` without `ifAbsent` on a missing key no longer leaves an empty
+  history entry for that key behind before throwing.
+
 ## 1.0.6
 
 - `README.md`: Fix CI badge.

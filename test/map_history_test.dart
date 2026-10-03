@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:map_history/map_history.dart';
 import 'package:test/test.dart';
 
@@ -374,7 +376,226 @@ void main() {
       expect(m.rollback(m.baseVersion - 1), isNull);
       expect(m.isEmpty, isTrue);
     });
+
+    // `consolidate` only visits the keys changed since they were last
+    // consolidated. This checks it against [_ReferenceMapHistory], which
+    // visits every key (the original algorithm), over random operations.
+    test('consolidate/rollback equivalent to a full scan (randomized)', () {
+      for (var seed = 1; seed <= 30; ++seed) {
+        var random = Random(seed);
+        var m = MapHistory<int, String>();
+        var ref = _ReferenceMapHistory();
+
+        for (var step = 0; step < 1500; ++step) {
+          var key = random.nextInt(12);
+          var value = 'v$step';
+          var op = random.nextInt(100);
+
+          String desc;
+          if (op < 35) {
+            desc = 'put($key)';
+            m[key] = value;
+            ref.put(key, value);
+          } else if (op < 50) {
+            desc = 'remove($key)';
+            m.remove(key);
+            ref.remove(key);
+          } else if (op < 55) {
+            desc = 'putIfAbsent($key)';
+            m.putIfAbsent(key, () => value);
+            ref.putIfAbsent(key, value);
+          } else if (op < 60) {
+            desc = 'update($key)';
+            m.update(key, (v) => '$v.', ifAbsent: () => value);
+            ref.update(key, (v) => '$v.', value);
+          } else if (op < 62) {
+            desc = 'clear';
+            m.clear();
+            ref.clear();
+          } else if (op < 64) {
+            desc = 'removeWhere(odd)';
+            m.removeWhere((k, v) => k.isOdd);
+            ref.removeWhere((k) => k.isOdd);
+          } else if (op < 66) {
+            desc = 'updateAll';
+            m.updateAll((k, v) => '$v!');
+            ref.updateAll((v) => '$v!');
+          } else if (op < 80) {
+            var target = m.baseVersion - 1 + random.nextInt(m.version + 3);
+            desc = 'rollback($target)';
+            var r1 = m.rollback(target);
+            var r2 = ref.rollback(target);
+            expect(
+              r1 == null ? null : '${r1.key}=${r1.value}',
+              equals(r2),
+              reason: 'seed: $seed ; step: $step ; $desc',
+            );
+          } else {
+            var target = random.nextInt(m.version + 3) - 1;
+            desc = 'consolidate($target)';
+            expect(
+              m.consolidate(target),
+              equals(ref.consolidate(target)),
+              reason: 'seed: $seed ; step: $step ; $desc',
+            );
+          }
+
+          var reason = 'seed: $seed ; step: $step ; $desc';
+          expect(m.toMap(), equals(ref.toMap()), reason: reason);
+          expect(m.length, equals(ref.length), reason: reason);
+          expect(m.version, equals(ref.version), reason: reason);
+          expect(m.baseVersion, equals(ref.baseVersion), reason: reason);
+        }
+      }
+    });
   });
+}
+
+/// The original [MapHistory] history algorithm, visiting every key on each
+/// [consolidate] and [rollback]: the reference for the randomized test.
+class _ReferenceMapHistory {
+  final Map<int, List<_RefEntry>> _entries = {};
+  int _zeroVersion = 0;
+  int _version = 0;
+
+  int get version => _version;
+
+  int get baseVersion => _zeroVersion == _version ? _version : _zeroVersion + 1;
+
+  Map<int, String> toMap() => {
+        for (var e in _entries.entries)
+          if (e.value.isNotEmpty && !e.value.last.deleted)
+            e.key: e.value.last.value!,
+      };
+
+  int get length => toMap().length;
+
+  bool _isLive(List<_RefEntry>? l) =>
+      l != null && l.isNotEmpty && !l.last.deleted;
+
+  void put(int key, String value) =>
+      (_entries[key] ??= []).add(_RefEntry(key, ++_version, value));
+
+  void putIfAbsent(int key, String value) {
+    var l = _entries[key] ??= [];
+    if (!_isLive(l)) l.add(_RefEntry(key, ++_version, value));
+  }
+
+  void update(int key, String Function(String) f, String ifAbsent) {
+    var l = _entries[key] ??= [];
+    var value = _isLive(l) ? f(l.last.value!) : ifAbsent;
+    l.add(_RefEntry(key, ++_version, value));
+  }
+
+  void remove(int key) {
+    var l = _entries[key];
+    if (_isLive(l)) l!.add(_RefEntry(key, ++_version, null));
+  }
+
+  void clear() => removeWhere((k) => true);
+
+  void removeWhere(bool Function(int key) test) {
+    for (var e in _entries.entries) {
+      if (_isLive(e.value) && test(e.key)) {
+        e.value.add(_RefEntry(e.key, ++_version, null));
+      }
+    }
+  }
+
+  void updateAll(String Function(String) f) {
+    for (var e in _entries.entries) {
+      if (_isLive(e.value)) {
+        e.value.add(_RefEntry(e.key, ++_version, f(e.value.last.value!)));
+      }
+    }
+  }
+
+  void _clearAll() {
+    _entries.clear();
+    _version = _zeroVersion;
+  }
+
+  String? _describe(_RefEntry? e) => e == null || e.deleted ? null : '$e';
+
+  String? rollback(int targetVersion) {
+    if (targetVersion <= _zeroVersion) {
+      _clearAll();
+      return null;
+    } else if (targetVersion == _version) {
+      for (var l in _entries.values) {
+        for (var e in l) {
+          if (e.version == targetVersion) return _describe(e);
+        }
+      }
+      return null;
+    } else if (targetVersion > _version) {
+      return null;
+    }
+
+    _RefEntry? target;
+    for (var l in _entries.values) {
+      l.removeWhere((e) {
+        if (e.version <= targetVersion) {
+          if (target == null || target!.version < e.version) target = e;
+          return false;
+        }
+        return true;
+      });
+      if (l.length == 1 && l.first.deleted) l.clear();
+    }
+    _entries.removeWhere((k, l) => l.isEmpty);
+
+    var found = target;
+    if (found == null) {
+      _clearAll();
+      return null;
+    }
+    _version = found.version;
+    return _describe(found);
+  }
+
+  int consolidate(int targetBaseVersion) {
+    if (targetBaseVersion <= _zeroVersion) {
+      return baseVersion;
+    } else if (targetBaseVersion > _version) {
+      var ver = _version;
+      _clearAll();
+      _zeroVersion = _version = ver;
+      return baseVersion;
+    }
+
+    var minimalVersion = _version;
+    for (var l in _entries.values) {
+      while (l.length > 2 && l.first.version < targetBaseVersion) {
+        l.removeAt(0);
+      }
+      if (l.length == 2 && l.last.version < targetBaseVersion) {
+        l.removeAt(0);
+      }
+      if (l.length == 1 && l.first.deleted) {
+        l.clear();
+      } else if (l.first.version < minimalVersion) {
+        minimalVersion = l.first.version;
+      }
+    }
+    _entries.removeWhere((k, l) => l.isEmpty);
+
+    _zeroVersion = minimalVersion - 1;
+    return baseVersion;
+  }
+}
+
+class _RefEntry {
+  final int key;
+  final int version;
+  final String? value;
+
+  _RefEntry(this.key, this.version, this.value);
+
+  bool get deleted => value == null;
+
+  @override
+  String toString() => '$key=$value';
 }
 
 extension _MapEntryExntesion<K, V> on MapEntry<K, V> {

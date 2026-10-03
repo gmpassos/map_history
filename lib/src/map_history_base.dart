@@ -146,8 +146,44 @@ class MapHistory<K, V> implements Map<K, V> {
 
   final Map<K, List<_MapEntry<K, V>>> _entries = <K, List<_MapEntry<K, V>>>{};
 
+  /// The keys that [consolidate] may change: the ones with more than one
+  /// entry, or a deleted one. Every other key has a single live entry, whose
+  /// version only matters to [consolidate] for [_minFirstVersion].
+  final Set<K> _dirtyKeys = <K>{};
+
+  /// The minimal version of the first entry of each key, if known.
+  /// Kept by [consolidate] (see there), so it doesn't need to visit every key.
+  int? _minFirstVersion;
+
+  /// Returns the entries of [key], for a new entry to be added: a key with
+  /// entries becomes dirty, and a new key may be the first one.
+  List<_MapEntry<K, V>> _valuesForNewEntry(K key) {
+    var values = _entries[key];
+    if (values != null) {
+      _dirtyKeys.add(key);
+      return values;
+    }
+
+    _entries[key] = values = <_MapEntry<K, V>>[];
+    if (_entries.length == 1) {
+      // The first key: its entry will have the next version.
+      _minFirstVersion = _version + 1;
+    }
+    return values;
+  }
+
+  int? _computeMinFirstVersion() {
+    int? min;
+    for (var values in _entries.values) {
+      if (values.isEmpty) continue;
+      var ver = values.first.version;
+      if (min == null || ver < min) min = ver;
+    }
+    return min;
+  }
+
   _MapEntry<K, V>? _put(K key, V value) {
-    var values = _entries.putIfAbsent(key, () => <_MapEntry<K, V>>[]);
+    var values = _valuesForNewEntry(key);
     var prev = values.lastOrNull;
 
     values.add(_nextEntry(key, value));
@@ -161,11 +197,10 @@ class MapHistory<K, V> implements Map<K, V> {
   }
 
   _MapEntry<K, V> _putIfAbsent(K key, V Function() ifAbsent) {
-    var values = _entries.putIfAbsent(key, () => <_MapEntry<K, V>>[]);
-
-    var prev = values.lastOrNull;
+    var prev = _entries[key]?.lastOrNull;
 
     if (prev == null || prev.isDeleted) {
+      var values = _valuesForNewEntry(key);
       _size++;
       var value = ifAbsent();
       var entry = _nextEntry(key, value);
@@ -178,17 +213,18 @@ class MapHistory<K, V> implements Map<K, V> {
 
   _MapEntry<K, V> _update(K key, V Function(V value) update,
       {V Function()? ifAbsent}) {
-    var values = _entries.putIfAbsent(key, () => <_MapEntry<K, V>>[]);
+    var prev = _entries[key]?.lastOrNull;
 
-    var prev = values.lastOrNull;
+    if ((prev == null || prev.isDeleted) && ifAbsent == null) {
+      throw ArgumentError(
+          "No previous value to update for key `$key`: `ifAbsent` parameter must be provided.");
+    }
+
+    var values = _valuesForNewEntry(key);
 
     if (prev == null || prev.isDeleted) {
-      if (ifAbsent == null) {
-        throw ArgumentError(
-            "No previous value to update for key `$key`: `ifAbsent` parameter must be provided.");
-      }
       _size++;
-      var value = ifAbsent();
+      var value = ifAbsent!();
       var entry = _nextEntry(key, value);
       values.add(entry);
       return entry;
@@ -254,6 +290,7 @@ class MapHistory<K, V> implements Map<K, V> {
       if (prev != null && !prev.isDeleted) {
         var newValue = update(key, prev.value);
         values.add(_nextEntry(key, newValue));
+        _dirtyKeys.add(key);
       }
       return values;
     });
@@ -273,6 +310,7 @@ class MapHistory<K, V> implements Map<K, V> {
 
     --_size;
     values.add(_nextEntryDeleted());
+    _dirtyKeys.add(key as K);
     return prev.value;
   }
 
@@ -291,6 +329,7 @@ class MapHistory<K, V> implements Map<K, V> {
       if (del) {
         --_size;
         values.add(_nextEntryDeleted());
+        _dirtyKeys.add(key);
       }
     }
   }
@@ -299,13 +338,15 @@ class MapHistory<K, V> implements Map<K, V> {
   /// - [rollback] is still possible to rever this operation.
   @override
   void clear() {
-    for (var values in _entries.values) {
+    for (var e in _entries.entries) {
+      var values = e.value;
       if (values.isEmpty) continue;
 
       var prev = values.last;
       if (prev.isDeleted) continue;
 
       values.add(_nextEntryDeleted());
+      _dirtyKeys.add(e.key);
     }
 
     _size = 0;
@@ -392,6 +433,16 @@ class MapHistory<K, V> implements Map<K, V> {
 
     _computeSize();
 
+    // A rollback visits every key anyway: rebuild the consolidation state.
+    _dirtyKeys.clear();
+    for (var e in _entries.entries) {
+      var values = e.value;
+      if (values.length > 1 || values.first.isDeleted) {
+        _dirtyKeys.add(e.key);
+      }
+    }
+    _minFirstVersion = _computeMinFirstVersion();
+
     var foundEntry = targetEntry;
 
     if (foundEntry != null) {
@@ -405,6 +456,8 @@ class MapHistory<K, V> implements Map<K, V> {
 
   void _clearAll() {
     _entries.clear();
+    _dirtyKeys.clear();
+    _minFirstVersion = null;
     _size = 0;
     _version = _zeroVersion;
     _lastTime = null;
@@ -427,9 +480,20 @@ class MapHistory<K, V> implements Map<K, V> {
       return baseVersion;
     }
 
-    var minimalVersion = version;
+    // Only the dirty keys can change: every other key has a single live
+    // entry, untouched here. Trimming a key's history can only raise its
+    // first version, so the minimal first version only changes if the key
+    // holding it changes: only then all the keys are visited.
+    var minFirstVersion = _minFirstVersion ?? _computeMinFirstVersion();
+    var minFirstVersionChanged = false;
+    List<K>? emptyKeys;
 
-    for (var values in _entries.values) {
+    _dirtyKeys.removeWhere((key) {
+      var values = _entries[key];
+      if (values == null || values.isEmpty) return true;
+
+      var firstVersion = values.first.version;
+
       while (values.length > 2 && values.first.version < targetBaseVersion) {
         values.removeAt(0);
       }
@@ -440,19 +504,35 @@ class MapHistory<K, V> implements Map<K, V> {
 
       if (values.length == 1 && values.first.isDeleted) {
         values.clear();
-      } else {
-        assert(values.isNotEmpty);
+        (emptyKeys ??= <K>[]).add(key);
+      }
 
-        var ver = values.first.version;
-        if (ver < minimalVersion) {
-          minimalVersion = ver;
-        }
+      if (firstVersion == minFirstVersion &&
+          (values.isEmpty || values.first.version != firstVersion)) {
+        minFirstVersionChanged = true;
+      }
+
+      // A single live entry: no longer dirty.
+      return values.length <= 1;
+    });
+
+    if (emptyKeys != null) {
+      for (var key in emptyKeys!) {
+        _entries.remove(key);
       }
     }
 
-    _entries.removeWhere((key, values) => values.isEmpty);
+    // The visible entries are unchanged: the size too.
 
-    _computeSize();
+    if (minFirstVersionChanged) {
+      minFirstVersion = _computeMinFirstVersion();
+    }
+    _minFirstVersion = minFirstVersion;
+
+    var minimalVersion = version;
+    if (minFirstVersion != null && minFirstVersion < minimalVersion) {
+      minimalVersion = minFirstVersion;
+    }
 
     _zeroVersion = minimalVersion - 1;
 
