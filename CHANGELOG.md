@@ -1,3 +1,42 @@
+## 1.0.8
+
+- New `revertVersions`: reverts only the operations of the given versions,
+  keeping every other one, including later ones on the same keys. Unlike
+  `rollback`, which discards every operation after a version, whoever made
+  it. This lets concurrent writers sharing the map (e.g. transactions)
+  revert only their own writes. An optional `keys` limits the search to
+  the keys changed.
+- New `revertibleVersion`: the minimal version `revertVersions` can revert,
+  the first one after the consolidated history.
+- Fixes in `consolidate`:
+  - It keeps the entry in effect at the target version. It used to remove
+    a key's first entry whenever the key had more than 2, even when the
+    next one came after the target: a `rollback` to the target then lost
+    that key's value.
+  - A target after the current `version` keeps the entries and removes all
+    the history. It used to clear the map, entries included.
+  - `baseVersion` is not before the target version. It used to be the
+    minimal first version of the kept entries, which allowed a `rollback`
+    to a version whose history was gone, giving a wrong state.
+- Fixes in `rollback`:
+  - Rolling back to the current `version` changes nothing. It used to
+    clear the map when the whole history was consolidated.
+  - It no longer moves `version` before the consolidated history.
+- Fixes in time:
+  - `lastTime` follows the operations. It was a `late final`, so it kept
+    the time of its first read.
+  - `findOperationVersionByTime` compared a `compareTo` result with the
+    base version. After a `consolidate`, a time before `initialTime` didn't
+    give the base.
+- Tests:
+  - The randomized test checks against a model that never trims its
+    history, instead of a copy of the previous algorithm, which had the
+    same `consolidate` bug.
+  - It covers `revertVersions` and the `keys` option, and adds a few-keys
+    run for more conflicts.
+  - New cases for `revertVersions`: lost updates, inserts, deletes,
+    interleaved writers, skipped and consolidated versions.
+
 ## 1.0.7
 
 - `consolidate` now visits only the keys changed since they were last
