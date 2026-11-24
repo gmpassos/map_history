@@ -6,6 +6,13 @@
   it. This lets concurrent writers sharing the map (e.g. transactions)
   revert only their own writes. An optional `keys` limits the search to
   the keys changed.
+  - It doesn't change `version`: a version is never used again, so the
+    versions other writers recorded stay valid.
+  - An operation over several keys (`addAll`, `updateAll`, `clear`, …)
+    uses one version per key: a writer records all of them.
+  - Versions no longer in the history are skipped (`0` or less too).
+    Consolidated ones are refused with a `StateError`, before anything is
+    reverted.
 - New `revertibleVersion`: the minimal version `revertVersions` can revert,
   the first one after the consolidated history.
 - Fixes in `consolidate`:
