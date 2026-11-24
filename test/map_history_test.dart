@@ -656,12 +656,14 @@ void main() {
       m.revertVersions([2]);
       expect(m, equals({'a': 3, 'b': 1}));
 
-      // To a reverted version: the state without it.
-      m.rollback(2);
+      // To a reverted version: the state without it. The version is the
+      // target (2), not the entry found (1): 2 isn't used again.
+      expect(m.rollback(2)?.value, equals(1));
       expect(m, equals({'a': 1}));
-      expect(m.version, equals(1));
+      expect(m.version, equals(2));
 
       m['b'] = 5;
+      expect(m.version, equals(3));
       m['a'] = 6;
       var revertible = m.version;
       m['b'] = 7;
@@ -669,6 +671,250 @@ void main() {
       expect(m, equals({'a': 6, 'b': 7}));
       expect(m.revertVersions([revertible]), equals(1));
       expect(m, equals({'a': 1, 'b': 7}));
+    });
+
+    test('a rollback to a reverted version: the version is not reused', () {
+      var m = MapHistory<String, int>();
+      m['a'] = 1; // v1
+      m['b'] = 2; // v2: writer A
+      var a = [m.version];
+      m['a'] = 3; // v3
+
+      m.revertVersions(a); // A aborts
+      m.rollback(2); // someone rolls back to v2 (reverted)
+      expect(m, equals({'a': 1}));
+      expect(m.version, equals(2));
+
+      // Writer C: v3 (not v2, A's).
+      m['c'] = 9;
+      expect(m.version, equals(3));
+
+      // A retries its abort: nothing (it used to remove C's write).
+      expect(m.revertVersions(a), equals(0));
+      expect(m, equals({'a': 1, 'c': 9}));
+    });
+
+    test('a rollback leaving no entry keeps the target version', () {
+      var m = MapHistory<String, int>();
+      m['a'] = 1; // v1
+      m['b'] = 2; // v2
+      m.revertVersions([1, 2]);
+      expect(m, isEmpty);
+
+      expect(m.rollback(1), isNull);
+      expect(m, isEmpty);
+      expect(m.version, equals(1));
+
+      m['c'] = 3;
+      expect(m.version, equals(2));
+      expect(m.revertVersions([1]), equals(0));
+      expect(m, equals({'c': 3}));
+    });
+
+    test('several deletions left with nothing before them: dropped', () {
+      var m = MapHistory<String, int>();
+      m['k'] = 1; // v1
+      m.remove('k'); // v2
+      m['k'] = 2; // v3
+      m.remove('k'); // v4
+
+      // [v1, v2 del, v4 del]: the second deletion is kept (after another
+      // one, it would still delete what a revert leaves before it).
+      expect(m.revertVersions([3]), equals(1));
+      expect(m, isEmpty);
+
+      // [v2 del, v4 del]: nothing before them, both dropped.
+      expect(m.revertVersions([1]), equals(1));
+      expect(m, isEmpty);
+      expect(m.containsKey('k'), isFalse);
+      expect(m.revertVersions([2]), equals(0));
+      expect(m.revertVersions([4]), equals(0));
+
+      // The key works as new:
+      m['k'] = 5;
+      expect(m, equals({'k': 5}));
+      expect(m.length, equals(1));
+    });
+
+    test('a deletion after another one still deletes', () {
+      var m = MapHistory<String, int>();
+      m['k'] = 1; // v1: writer X
+      m.remove('k'); // v2: writer B
+      m['k'] = 2; // v3: writer A
+      m.remove('k'); // v4: writer C
+
+      // A aborts: [v1, v2 del, v4 del].
+      m.revertVersions([3]);
+      // B aborts: C's deletion still removes X's value.
+      expect(m.revertVersions([2]), equals(1));
+      expect(m, isEmpty);
+
+      // C aborts too: X's value is back.
+      expect(m.revertVersions([4]), equals(1));
+      expect(m, equals({'k': 1}));
+    });
+
+    test('versions 0 or less: never used, skipped', () {
+      var m = MapHistory<String, int>();
+      m['a'] = 1;
+
+      expect(m.revertVersions([0]), equals(0));
+      expect(m.revertVersions([-1, 0]), equals(0));
+      expect(m, equals({'a': 1}));
+
+      // Also after a consolidate: not "consolidated".
+      m['a'] = 2;
+      m.consolidate(m.version);
+      expect(m.revertVersions([0, -5]), equals(0));
+      expect(() => m.revertVersions([1]), throwsStateError);
+    });
+
+    test('multi-key operations: one version per key, reverted whole', () {
+      var m = MapHistory<String, int>();
+      m['a'] = 1;
+      m['b'] = 2;
+
+      var before = m.version;
+      m.addAll({'x': 1, 'y': 2, 'z': 3});
+      var addAll = [for (var v = before + 1; v <= m.version; ++v) v];
+      expect(addAll.length, equals(3));
+
+      // Only the last version: only `z` (the doc's range is all of them).
+      expect(m.revertVersions([m.version]), equals(1));
+      expect(m, equals({'a': 1, 'b': 2, 'x': 1, 'y': 2}));
+      expect(m.revertVersions(addAll), equals(2));
+      expect(m, equals({'a': 1, 'b': 2}));
+
+      before = m.version;
+      m.updateAll((k, v) => v * 10);
+      var updateAll = [for (var v = before + 1; v <= m.version; ++v) v];
+      expect(m, equals({'a': 10, 'b': 20}));
+
+      before = m.version;
+      m.removeWhere((k, v) => k == 'a');
+      var removeWhere = [for (var v = before + 1; v <= m.version; ++v) v];
+      expect(m, equals({'b': 20}));
+
+      before = m.version;
+      m.clear();
+      var clear = [for (var v = before + 1; v <= m.version; ++v) v];
+      expect(m, isEmpty);
+
+      // In any order:
+      expect(m.revertVersions(updateAll), equals(2));
+      expect(m, isEmpty);
+      expect(m.revertVersions(clear), equals(1));
+      expect(m, equals({'b': 2}));
+      expect(m.revertVersions(removeWhere), equals(1));
+      expect(m, equals({'a': 1, 'b': 2}));
+    });
+
+    test('versions and keys may be iterated only once', () {
+      var m = MapHistory<String, int>();
+      m['a'] = 1;
+      m['a'] = 2;
+      m['b'] = 3;
+
+      expect(
+          m.revertVersions(_OneShotIterable([2, 3]),
+              keys: _OneShotIterable(['a', 'b'])),
+          equals(2));
+      expect(m, equals({'a': 1}));
+
+      // Lazy (generated) iterables too:
+      m['c'] = 4;
+      var v = m.version;
+      expect(
+          m.revertVersions([v].map((e) => e), keys: ['c'].where((k) => true)),
+          equals(1));
+      expect(m, equals({'a': 1}));
+    });
+
+    test('the map API after reverts', () {
+      var m = MapHistory<String, int>();
+      m['a'] = 1; // v1
+      m['b'] = 2; // v2
+      m.remove('a'); // v3
+      m['c'] = 3; // v4
+
+      m.revertVersions([3, 4]);
+
+      expect(m, equals({'a': 1, 'b': 2}));
+      expect(m.length, equals(2));
+      expect(m.isNotEmpty, isTrue);
+      expect(m['a'], equals(1));
+      expect(m['c'], isNull);
+      expect(m.containsKey('c'), isFalse);
+      expect(m.containsValue(1), isTrue);
+      expect(m.containsValue(3), isFalse);
+      expect(m.keys, equals(['a', 'b']));
+      expect(m.values, equals([1, 2]));
+      expect(
+          {for (var e in m.entries) e.key: e.value}, equals({'a': 1, 'b': 2}));
+
+      var visited = <String, int>{};
+      m.forEach((k, v) => visited[k] = v);
+      expect(visited, equals({'a': 1, 'b': 2}));
+
+      // The reverted operations are no longer found:
+      expect(m.findOperationEntryByVersion(4), isNull);
+      expect(m.findOperationEntryByVersion(1)?.value, equals(1));
+
+      // Writing over a reverted key, or one whose deletion was reverted:
+      expect(m.putIfAbsent('c', () => 30), equals(30));
+      expect(m.putIfAbsent('a', () => 99), equals(1));
+      expect(m.update('a', (v) => v + 1), equals(2));
+      m.updateAll((k, v) => v * 10);
+      expect(m, equals({'a': 20, 'b': 20, 'c': 300}));
+
+      expect(m.map((k, v) => MapEntry(v, k)), equals({20: 'b', 300: 'c'}));
+      expect(m.cast<String, num>(), equals({'a': 20, 'b': 20, 'c': 300}));
+
+      // All reverted: empty, and works as new.
+      m.revertVersions(List.generate(m.version, (i) => i + 1));
+      expect(m, isEmpty);
+      expect(m.length, equals(0));
+      expect(m.keys, isEmpty);
+      m['z'] = 1;
+      expect(m, equals({'z': 1}));
+      expect(m.length, equals(1));
+    });
+
+    test('the base version after reverting the first entries', () {
+      var m = MapHistory<String, int>();
+      m['a'] = 1; // v1: the first entry of all
+      m['b'] = 1; // v2
+      m['b'] = 2; // v3
+
+      // `a` (v1) reverted: the minimal first version is now `b`'s (v2).
+      m.revertVersions([1]);
+      expect(m.consolidate(1), equals(2));
+      expect(m.baseVersion, equals(2));
+      m.rollback(2);
+      expect(m, equals({'b': 1}));
+
+      // All reverted, then a new first key: its version is the minimal.
+      var m2 = MapHistory<String, int>();
+      m2['a'] = 1; // v1
+      m2['b'] = 1; // v2
+      m2.revertVersions([1, 2]);
+      m2['c'] = 1; // v3
+      m2['c'] = 2; // v4
+      expect(m2.consolidate(1), equals(3));
+      m2.rollback(3);
+      expect(m2, equals({'c': 1}));
+    });
+
+    test('a revert keeps lastTime (the last change made)', () async {
+      var m = MapHistory<String, int>();
+      m['a'] = 1;
+      await Future<void>.delayed(Duration(milliseconds: 5));
+      m['a'] = 2;
+      var last = m.lastTime;
+
+      m.revertVersions([m.version]);
+      expect(m.lastTime, equals(last));
+      expect(m, equals({'a': 1}));
     });
 
     test('many keys: length, keys and values stay consistent', () {
@@ -731,10 +977,11 @@ void main() {
 /// One randomized run for the `randomized` test: [steps] operations over
 /// [keysCount] keys, checked against [_FullHistoryModel] after each one.
 ///
-/// Rollback targets are versions between operations (an operation over
-/// several keys gives its keys versions in the map's key order, which the
-/// model doesn't follow), and only single-key writes are reverted, for the
-/// same reason.
+/// An operation over several keys (`clear`, `removeWhere`, `updateAll`)
+/// gives its keys versions in the map's key order, which the model doesn't
+/// follow. So rollback targets are versions between operations, and such an
+/// operation is only reverted whole (all its versions): then the order
+/// doesn't matter.
 void _randomizedRun(int seed, {required int steps, required int keysCount}) {
   var random = Random(seed);
   var m = MapHistory<int, String>();
@@ -744,11 +991,40 @@ void _randomizedRun(int seed, {required int steps, required int keysCount}) {
   var boundaries = <int>[0];
   // Versions of single-key writes, not yet reverted: revert candidates.
   var singleKeyWrites = <int, int>{}; // version -> key
+  // Single-key writes of a value (not a removal), for the entry a rollback
+  // to it returns. Apart from [singleKeyWrites]: a consolidated write is no
+  // longer revertible, but may still be a rollback target.
+  var singleKeyValues = <int, MapEntry<int, String>>{};
+  // Multi-key operations, not yet reverted: all their versions and keys.
+  var multiKeyWrites = <({Set<int> versions, Set<int> keys})>[];
 
+  /// After a rollback to [version]: the operations after it are discarded
+  /// (and their versions used again), so they are no longer rollback targets
+  /// nor revert candidates.
   void dropAfter(int version) {
     boundaries.removeWhere((v) => v > version);
     singleKeyWrites.removeWhere((v, k) => v > version);
+    singleKeyValues.removeWhere((v, k) => v > version);
+    multiKeyWrites.removeWhere((w) => w.versions.any((v) => v > version));
   }
+
+  /// Records a multi-key operation made after [versionBefore], over [keys]:
+  /// all its versions, up to the current one, for a revert of it whole.
+  void addMultiKeyWrite(int versionBefore, Iterable<int> keys) {
+    if (m.version == versionBefore) return;
+    multiKeyWrites.add((
+      versions: {for (var v = versionBefore + 1; v <= m.version; ++v) v},
+      keys: keys.toSet(),
+    ));
+  }
+
+  /// [versions] (or [keys]) as one of the accepted shapes: a `List`, a `Set`
+  /// or a one-shot iterable (which fails if iterated twice).
+  Iterable<int> shaped(Iterable<int> values) => switch (random.nextInt(3)) {
+        0 => values.toList(),
+        1 => values.toSet(),
+        _ => _OneShotIterable(values.toList()),
+      };
 
   for (var step = 0; step < steps; ++step) {
     var key = random.nextInt(keysCount);
@@ -762,6 +1038,7 @@ void _randomizedRun(int seed, {required int steps, required int keysCount}) {
       desc = 'put($key)';
       m[key] = value;
       model.write(key, value, m.version);
+      singleKeyValues[m.version] = MapEntry(key, value);
       singleKey = true;
     } else if (op < 42) {
       desc = 'remove($key)';
@@ -770,28 +1047,39 @@ void _randomizedRun(int seed, {required int steps, required int keysCount}) {
       singleKey = true;
     } else if (op < 46) {
       desc = 'putIfAbsent($key)';
-      m.putIfAbsent(key, () => value);
-      if (m.version != versionBefore) model.write(key, value, m.version);
+      var prev = m[key];
+      var v = m.putIfAbsent(key, () => value);
+      if (m.version != versionBefore) {
+        model.write(key, value, m.version);
+        singleKeyValues[m.version] = MapEntry(key, value);
+      } else {
+        // Present: its value, no operation.
+        expect(v, equals(prev), reason: 'seed: $seed ; $desc');
+      }
       singleKey = true;
     } else if (op < 50) {
       desc = 'update($key)';
       var v = m.update(key, (v) => '$v.', ifAbsent: () => value);
       model.write(key, v, m.version);
+      singleKeyValues[m.version] = MapEntry(key, v);
       singleKey = true;
     } else if (op < 52) {
       desc = 'clear';
       var live = m.keys.toList();
       m.clear();
       model.writeMany({for (var k in live) k: null}, versionBefore, m.version);
+      addMultiKeyWrite(versionBefore, live);
     } else if (op < 54) {
       desc = 'removeWhere(odd)';
       var odd = m.keys.where((k) => k.isOdd).toList();
       m.removeWhere((k, v) => k.isOdd);
       model.writeMany({for (var k in odd) k: null}, versionBefore, m.version);
+      addMultiKeyWrite(versionBefore, odd);
     } else if (op < 56) {
       desc = 'updateAll';
       m.updateAll((k, v) => '$v!');
       model.writeMany(m.toMap(), versionBefore, m.version);
+      addMultiKeyWrite(versionBefore, m.keys);
     } else if (op < 68) {
       // Rollback to a version between operations, from the base on (or,
       // rarely, before it: the map is cleared).
@@ -799,13 +1087,34 @@ void _randomizedRun(int seed, {required int steps, required int keysCount}) {
       if (valid.isEmpty || random.nextInt(20) == 0) {
         var target = m.baseVersion - 1;
         desc = 'rollback($target) [before base]';
-        m.rollback(target);
+        var zero = m.revertibleVersion - 1;
+        expect(m.rollback(target), isNull, reason: 'seed: $seed ; $desc');
         model.clear();
+        // Cleared, back to the consolidated version: every write recorded
+        // is gone (nothing to roll back to, or revert, any more).
+        expect(m.isEmpty, isTrue, reason: 'seed: $seed ; $desc');
+        expect(m.version, equals(zero), reason: 'seed: $seed ; $desc');
+        boundaries.clear();
+        singleKeyWrites.clear();
+        singleKeyValues.clear();
+        multiKeyWrites.clear();
       } else {
         var target = valid[random.nextInt(valid.length)];
         desc = 'rollback($target)';
-        m.rollback(target);
+        var expectedEntry = singleKeyValues[target];
+        var entry = m.rollback(target);
+        // The target (not the entry found: no version up to it is reused).
+        expect(m.version, equals(target), reason: 'seed: $seed ; $desc');
         model.rollback(target);
+        // To a single-key write of a value (still in the history): its
+        // entry. (Not checked for a removal: one a revert left with nothing
+        // before it was dropped, and the entry is then the previous one.)
+        if (expectedEntry != null) {
+          expect(entry?.key, equals(expectedEntry.key),
+              reason: 'seed: $seed ; $desc');
+          expect(entry?.value, equals(expectedEntry.value),
+              reason: 'seed: $seed ; $desc');
+        }
       }
       dropAfter(m.version);
       boundaries.add(m.version);
@@ -813,15 +1122,44 @@ void _randomizedRun(int seed, {required int steps, required int keysCount}) {
       var target = random.nextInt(m.version + 3) - 1;
       desc = 'consolidate($target)';
       var before = m.toMap();
-      m.consolidate(target);
-      expect(m.toMap(), equals(before), reason: 'seed: $seed ; $desc');
+      var baseBefore = m.baseVersion;
+      var zeroBefore = m.revertibleVersion - 1;
+      var base = m.consolidate(target);
+      var reason = 'seed: $seed ; $desc';
+      expect(m.toMap(), equals(before), reason: reason);
+      expect(base, equals(m.baseVersion), reason: reason);
+      expect(m.version, equals(versionBefore), reason: reason);
+      if (target <= zeroBefore) {
+        // Already consolidated there: nothing changes.
+        expect(base, equals(baseBefore), reason: reason);
+      } else if (target > m.version) {
+        // All the history:
+        expect(base, equals(m.version), reason: reason);
+        expect(m.revertibleVersion, equals(m.version + 1), reason: reason);
+      } else {
+        // Not before the target (its history is gone), and never back:
+        expect(base, greaterThanOrEqualTo(target), reason: reason);
+        expect(base, greaterThanOrEqualTo(baseBefore), reason: reason);
+      }
       // The model keeps its history, but the map no longer can revert them:
-      singleKeyWrites.removeWhere((v, k) => v < m.revertibleVersion);
+      var revertible = m.revertibleVersion;
+      singleKeyWrites.removeWhere((v, k) => v < revertible);
+      multiKeyWrites.removeWhere((w) => w.versions.any((v) => v < revertible));
     } else {
-      // Revert a few single-key writes (a "writer" aborting), sometimes
-      // with their keys, sometimes one before the base (refused).
+      // Revert a few single-key writes and, sometimes, whole multi-key
+      // operations (a "writer" aborting); sometimes with their keys (plus
+      // others and duplicates), sometimes one before the base (refused).
       var candidates = singleKeyWrites.keys.toList()..shuffle(random);
       var versions = candidates.take(1 + random.nextInt(4)).toList();
+      var keysOf = {for (var v in versions) singleKeyWrites[v]!};
+      var multi = <({Set<int> versions, Set<int> keys})>[];
+      if (multiKeyWrites.isNotEmpty && random.nextInt(3) == 0) {
+        multi.add(multiKeyWrites[random.nextInt(multiKeyWrites.length)]);
+        for (var w in multi) {
+          versions.addAll(w.versions);
+          keysOf.addAll(w.keys);
+        }
+      }
       if (m.revertibleVersion > 1 && random.nextInt(15) == 0) {
         var consolidated = m.revertibleVersion - 1;
         desc = 'revertVersions($consolidated) [consolidated]';
@@ -831,31 +1169,49 @@ void _randomizedRun(int seed, {required int steps, required int keysCount}) {
             reason: 'seed: $seed ; $desc');
         expect(m.toMap(), equals(before), reason: 'seed: $seed ; $desc');
       } else {
-        var withKeys = random.nextBool();
-        desc = 'revertVersions($versions, keys: $withKeys)';
-        var reverted = m.revertVersions(
-          versions,
-          keys: withKeys ? versions.map((v) => singleKeyWrites[v]!) : null,
-        );
+        // `keys`: none, exactly the ones changed, or with others (and
+        // duplicates): only the ones holding the versions matter.
+        var keysMode = random.nextInt(3);
+        Iterable<int>? keys = switch (keysMode) {
+          0 => null,
+          1 => shaped(keysOf),
+          _ => shaped([
+              ...keysOf,
+              ...keysOf,
+              random.nextInt(keysCount),
+              keysCount + 100,
+            ]),
+        };
+        desc = 'revertVersions($versions, keysMode: $keysMode, '
+            'multi: ${multi.length})';
+        var reverted = m.revertVersions(shaped(versions), keys: keys);
         // Fewer when a revert dropped a remove left with nothing before it
         // (no longer in the history): the state is checked below.
-        expect(reverted, lessThanOrEqualTo(versions.length),
+        expect(reverted, lessThanOrEqualTo(versions.toSet().length),
             reason: 'seed: $seed ; $desc');
         model.revert(versions.toSet());
         for (var v in versions) {
           singleKeyWrites.remove(v);
+          singleKeyValues.remove(v);
         }
+        multiKeyWrites.removeWhere((w) => multi.contains(w));
+        // Reverted: a second time finds nothing.
+        expect(m.revertVersions(versions), equals(0),
+            reason: 'seed: $seed ; $desc [again]');
       }
     }
 
     if (singleKey && m.version != versionBefore) {
       singleKeyWrites[m.version] = key;
     }
-    if (m.version != versionBefore && boundaries.last != m.version) {
+    if (boundaries.isEmpty || boundaries.last != m.version) {
       boundaries.add(m.version);
     }
-    // The model's counter follows the map's (a rollback moves it back).
-    model.version = m.version;
+    // Only a rollback moves the version back:
+    if (!desc.startsWith('rollback')) {
+      expect(m.version, greaterThanOrEqualTo(versionBefore),
+          reason: 'seed: $seed ; step: $step ; $desc');
+    }
 
     var reason = 'seed: $seed ; step: $step ; $desc';
     var expected = model.state();
@@ -866,8 +1222,66 @@ void _randomizedRun(int seed, {required int steps, required int keysCount}) {
     for (var k = 0; k < keysCount; ++k) {
       expect(m.containsKey(k), equals(expected.containsKey(k)),
           reason: '$reason ; key: $k');
+      expect(m[k], equals(expected[k]), reason: '$reason ; key: $k');
     }
+    _expectReadViewsConsistent(m, expected, reason);
+
     expect(m.baseVersion, lessThanOrEqualTo(m.version), reason: reason);
+    // The same, except when the whole history is consolidated:
+    expect(
+      m.revertibleVersion == m.baseVersion ||
+          (m.baseVersion == m.version && m.revertibleVersion == m.version + 1),
+      isTrue,
+      reason: '$reason ; base: ${m.baseVersion} ; '
+          'revertible: ${m.revertibleVersion} ; version: ${m.version}',
+    );
+  }
+}
+
+/// Checks every read view of [m] (`isNotEmpty`, `values`, `entries`,
+/// `forEach`, `containsValue`) against the [expected] content: the views are
+/// computed apart from `toMap`, from the same history lists.
+void _expectReadViewsConsistent(
+    MapHistory<int, String> m, Map<int, String> expected, String reason) {
+  expect(m.isNotEmpty, equals(expected.isNotEmpty), reason: reason);
+  expect(m.keys.length, equals(expected.length), reason: reason);
+  expect(m.values.toList()..sort(), equals(expected.values.toList()..sort()),
+      reason: reason);
+  expect({for (var e in m.entries) e.key: e.value}, equals(expected),
+      reason: reason);
+
+  var visited = <int, String>{};
+  m.forEach((k, v) => visited[k] = v);
+  expect(visited, equals(expected), reason: reason);
+
+  // `keys`, `values` and `entries` iterate in the same order:
+  expect(m.entries.map((e) => e.key).toList(), equals(m.keys.toList()),
+      reason: reason);
+  expect(m.entries.map((e) => e.value).toList(), equals(m.values.toList()),
+      reason: reason);
+
+  for (var v in expected.values) {
+    expect(m.containsValue(v), isTrue, reason: '$reason ; value: $v');
+  }
+  expect(m.containsValue('absent'), isFalse, reason: reason);
+}
+
+/// An [Iterable] that can be iterated only once, like a generator over a
+/// stream of input: [MapHistory.revertVersions] must not iterate its
+/// arguments twice.
+class _OneShotIterable<T> extends Iterable<T> {
+  final List<T> _values;
+  bool _iterated = false;
+
+  _OneShotIterable(this._values);
+
+  @override
+  Iterator<T> get iterator {
+    if (_iterated) {
+      throw StateError('Iterated twice');
+    }
+    _iterated = true;
+    return _values.iterator;
   }
 }
 
@@ -875,7 +1289,6 @@ void _randomizedRun(int seed, {required int steps, required int keysCount}) {
 /// trimmed. The state is each key's last remaining write.
 class _FullHistoryModel {
   final List<_ModelWrite> _writes = [];
-  int version = 0;
 
   void write(int key, String? value, int version) =>
       _writes.add(_ModelWrite(key, version, value));
@@ -912,6 +1325,8 @@ class _FullHistoryModel {
   }
 }
 
+/// A write of [_FullHistoryModel]: [key] set to [value] (`null`: removed)
+/// at [version].
 class _ModelWrite {
   final int key;
   final int version;

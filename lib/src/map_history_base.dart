@@ -112,8 +112,12 @@ class MapHistory<K, V> implements Map<K, V> {
 
   DateTime? _lastTime;
 
-  /// The last operation [DateTime] (the [initialTime] before any operation).
-  /// A getter: a `late final` field would keep the time of its first read.
+  /// The [DateTime] of the last operation made (the [initialTime] before
+  /// any). A [rollback] or [revertVersions] doesn't change it, though the
+  /// operation may have been discarded: it's the time of the last change
+  /// made, not of the last entry kept. (Except a [rollback] that leaves no
+  /// entry at all, and [purgeAll]: then it's the [initialTime] again.) A
+  /// getter: a `late final` field would keep the time of its first read.
   DateTime get lastTime => _lastTime ?? initialTime;
 
   int _zeroVersion = 0;
@@ -409,6 +413,12 @@ class MapHistory<K, V> implements Map<K, V> {
   /// It discards every later operation, whoever made it. To discard only some
   /// operations (e.g. one transaction's, among concurrent ones), see
   /// [revertVersions].
+  ///
+  /// The [version] becomes [targetVersion] (even when that operation was
+  /// reverted: see [revertVersions]), so no version up to it is used again.
+  /// The versions after it are used again by the next operations: versions
+  /// recorded after [targetVersion] are no longer valid for
+  /// [revertVersions].
   MapEntry<K, V>? rollback(int targetVersion) {
     // Checked first: rolling back to the current version changes nothing,
     // even when it's the [baseVersion] of a fully consolidated history.
@@ -461,17 +471,20 @@ class MapHistory<K, V> implements Map<K, V> {
 
     var foundEntry = targetEntry;
 
-    if (foundEntry != null) {
-      // Not before the consolidated history: the entry found may be one a
-      // key kept from before it (the one in effect at the base), and every
-      // remaining entry is then at or before [_zeroVersion].
-      var foundVersion = foundEntry.version;
-      _version = foundVersion > _zeroVersion ? foundVersion : _zeroVersion;
-      return foundEntry.isDeleted ? null : foundEntry.asMapEntry;
-    } else {
+    if (foundEntry == null) {
       _clearAll();
-      return null;
     }
+
+    // The target, not the version of the entry found: that one may be
+    // before it, when the operations between were reverted (a version reused
+    // there would be one a writer recorded, and a retried revert of it would
+    // remove the new operation), or when it's the entry a key kept from
+    // before the consolidated history.
+    _version = targetVersion;
+
+    return foundEntry == null || foundEntry.isDeleted
+        ? null
+        : foundEntry.asMapEntry;
   }
 
   /// Reverts only the operations of [versions], keeping every other one, and
@@ -491,14 +504,20 @@ class MapHistory<K, V> implements Map<K, V> {
   /// ```
   ///
   /// - The writer records its versions: [version] right after each of its
-  ///   operations (a [remove] too).
+  ///   operations (a [remove] too). An operation over several keys
+  ///   ([addAll], [addEntries], [updateAll], [removeWhere], [clear]) uses one
+  ///   version per key changed: all the versions after [version] before it,
+  ///   up to [version] after it.
   /// - [keys], if given, are the only keys searched for [versions] (the keys
   ///   the writer changed). Otherwise every key is searched.
   /// - The [version] doesn't change: a version is never used again, so the
-  ///   versions recorded by other writers stay valid.
+  ///   versions recorded by other writers stay valid. (Except after a
+  ///   [rollback], for the versions after its target.)
   /// - A version no longer in the history is skipped: already reverted,
-  ///   discarded by a [rollback], or a [remove] left with no previous entry
-  ///   by a revert (dropped then: there was nothing to remove). One before [revertibleVersion] can't be
+  ///   discarded by a [rollback], never used (`0` or less too), or a
+  ///   [remove] left with nothing before it by a revert (dropped then: there
+  ///   was nothing to remove).
+  /// - A version before [revertibleVersion] (but after `0`) can't be
   ///   reverted (its previous entries may have been consolidated): a
   ///   [StateError], before anything is reverted.
   /// - A [rollback] to a reverted version gives the state from before it.
@@ -506,9 +525,10 @@ class MapHistory<K, V> implements Map<K, V> {
     var targetVersions = versions is Set<int> ? versions : versions.toSet();
     if (targetVersions.isEmpty) return 0;
 
-    // All checked before reverting anything:
+    // All checked before reverting anything. A version of `0` or less was
+    // never used (the first operation is `1`): not in the history, skipped.
     for (var ver in targetVersions) {
-      if (ver <= _zeroVersion) {
+      if (ver > 0 && ver <= _zeroVersion) {
         throw StateError(
             "Can't revert version $ver: consolidated (`revertibleVersion`: $revertibleVersion).");
       }
@@ -518,6 +538,10 @@ class MapHistory<K, V> implements Map<K, V> {
     var minFirstVersionChanged = false;
     List<K>? emptyKeys;
 
+    /// Reverts [targetVersions] in [key]'s history ([values]), for the loops
+    /// below: removes their entries, then keeps [_size], [_dirtyKeys] and
+    /// [_minFirstVersion] in step (as [consolidate] needs them), and collects
+    /// a key left with no entry in `emptyKeys`, removed after the loops.
     void revertKey(K key, List<_MapEntry<K, V>> values) {
       var length = values.length;
       if (length == 0) return;
@@ -531,9 +555,12 @@ class MapHistory<K, V> implements Map<K, V> {
       if (removed == 0) return;
       reverted += removed;
 
-      // Left with only a deletion: the key didn't exist before.
-      if (values.length == 1 && values.first.isDeleted) {
-        values.clear();
+      // Leading deletions have nothing before them to delete: dropped (the
+      // key is absent either way). Not only a single one: a revert can
+      // leave several (`[del, del]`). A deletion after another one is kept:
+      // it still deletes whatever a later revert may leave before it.
+      while (values.isNotEmpty && values.first.isDeleted) {
+        values.removeAt(0);
       }
 
       var isLive = values.isNotEmpty && !values.last.isDeleted;

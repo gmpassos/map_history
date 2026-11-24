@@ -21,10 +21,16 @@
 - Fixes in `rollback`:
   - Rolling back to the current `version` changes nothing. It used to
     clear the map when the whole history was consolidated.
-  - It no longer moves `version` before the consolidated history.
+  - **Behavior change**: `version` becomes the target version, not the
+    version of the entry found at or before it. Those differ when the
+    operations between were reverted, or when a key kept an entry from
+    before the consolidated history. The next operations reused the
+    versions in between, which writers may have recorded: a retried
+    `revertVersions` then removed someone else's new write.
 - Fixes in time:
-  - `lastTime` follows the operations. It was a `late final`, so it kept
-    the time of its first read.
+  - `lastTime` follows the operations made. It was a `late final`, so it
+    kept the time of its first read. A `rollback` or `revertVersions`
+    doesn't change it.
   - `findOperationVersionByTime` compared a `compareTo` result with the
     base version. After a `consolidate`, a time before `initialTime` didn't
     give the base.
@@ -32,10 +38,24 @@
   - The randomized test checks against a model that never trims its
     history, instead of a copy of the previous algorithm, which had the
     same `consolidate` bug.
-  - It covers `revertVersions` and the `keys` option, and adds a few-keys
-    run for more conflicts.
-  - New cases for `revertVersions`: lost updates, inserts, deletes,
-    interleaved writers, skipped and consolidated versions.
+    - It covers `revertVersions`: single-key writes and whole multi-key
+      operations, with and without `keys` (plus extra keys and
+      duplicates), and as a `List`, a `Set` or a one-shot iterable.
+    - After each step it checks every read view (`[]`, `keys`, `values`,
+      `entries`, `forEach`, `containsKey`, `containsValue`), `version`
+      after a rollback, `baseVersion` after a consolidate, and the entry a
+      rollback returns.
+    - It adds a run over few keys, for more conflicts.
+  - New cases for `revertVersions`:
+    - lost updates, inserts and deletes;
+    - interleaved writers, and a deletion after another one;
+    - multi-key operations, and one-shot iterables;
+    - skipped (`0` and less) and consolidated versions;
+    - version reuse after a rollback;
+    - the map API after reverts, and the base version after reverting
+      the first entries.
+  - Checked by putting back the previous `consolidate` and `rollback`: the
+    randomized test and the explicit cases fail.
 
 ## 1.0.7
 
