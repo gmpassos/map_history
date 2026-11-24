@@ -112,8 +112,13 @@ class MapHistory<K, V> implements Map<K, V> {
 
   DateTime? _lastTime;
 
-  /// The last operation [DateTime].
-  late final DateTime lastTime = _lastTime ?? initialTime;
+  /// The [DateTime] of the last operation made (the [initialTime] before
+  /// any). A [rollback] or [revertVersions] doesn't change it, though the
+  /// operation may have been discarded: it's the time of the last change
+  /// made, not of the last entry kept. (Except a [rollback] that leaves no
+  /// entry at all, and [purgeAll]: then it's the [initialTime] again.) A
+  /// getter: a `late final` field would keep the time of its first read.
+  DateTime get lastTime => _lastTime ?? initialTime;
 
   int _zeroVersion = 0;
   int _version = 0;
@@ -121,6 +126,12 @@ class MapHistory<K, V> implements Map<K, V> {
   /// The minimal [version] that a [rollback] can target.
   /// See [consolidate].
   int get baseVersion => _zeroVersion == _version ? _version : _zeroVersion + 1;
+
+  /// The minimal version [revertVersions] can revert: the first one after
+  /// the consolidated history (see [consolidate]), whose previous entries are
+  /// all kept. The same as [baseVersion], except when the whole history is
+  /// consolidated: then it's after the current [version].
+  int get revertibleVersion => _zeroVersion + 1;
 
   /// The current version of this instance.
   /// Every operation increments the version number.
@@ -368,7 +379,7 @@ class MapHistory<K, V> implements Map<K, V> {
   /// Returns the version operation for the [targetTime],
   /// or the nearest version for [targetTime].
   int findOperationVersionByTime(DateTime targetTime) {
-    if (targetTime.compareTo(initialTime) < _zeroVersion) {
+    if (targetTime.isBefore(initialTime)) {
       return _zeroVersion;
     }
 
@@ -394,14 +405,29 @@ class MapHistory<K, V> implements Map<K, V> {
     return best?.version ?? _zeroVersion;
   }
 
-  /// Rollbacks to the operation of [targetVersion].
+  /// Rollbacks to the operation of [targetVersion]: every operation after it
+  /// is discarded. A [targetVersion] before [baseVersion] (see [consolidate])
+  /// clears the map, as its history there is gone; the current [version] (or
+  /// a later one) changes nothing.
+  ///
+  /// It discards every later operation, whoever made it. To discard only some
+  /// operations (e.g. one transaction's, among concurrent ones), see
+  /// [revertVersions].
+  ///
+  /// The [version] becomes [targetVersion] (even when that operation was
+  /// reverted: see [revertVersions]), so no version up to it is used again.
+  /// The versions after it are used again by the next operations: versions
+  /// recorded after [targetVersion] are no longer valid for
+  /// [revertVersions].
   MapEntry<K, V>? rollback(int targetVersion) {
-    if (targetVersion <= _zeroVersion) {
-      _clearAll();
-      return null;
-    } else if (targetVersion == version) {
+    // Checked first: rolling back to the current version changes nothing,
+    // even when it's the [baseVersion] of a fully consolidated history.
+    if (targetVersion == version) {
       return findOperationEntryByVersion(targetVersion);
     } else if (targetVersion > version) {
+      return null;
+    } else if (targetVersion <= _zeroVersion) {
+      _clearAll();
       return null;
     }
 
@@ -445,13 +471,144 @@ class MapHistory<K, V> implements Map<K, V> {
 
     var foundEntry = targetEntry;
 
-    if (foundEntry != null) {
-      _version = foundEntry.version;
-      return foundEntry.isDeleted ? null : foundEntry.asMapEntry;
-    } else {
+    if (foundEntry == null) {
       _clearAll();
-      return null;
     }
+
+    // The target, not the version of the entry found: that one may be
+    // before it, when the operations between were reverted (a version reused
+    // there would be one a writer recorded, and a retried revert of it would
+    // remove the new operation), or when it's the entry a key kept from
+    // before the consolidated history.
+    _version = targetVersion;
+
+    return foundEntry == null || foundEntry.isDeleted
+        ? null
+        : foundEntry.asMapEntry;
+  }
+
+  /// Reverts only the operations of [versions], keeping every other one, and
+  /// returns how many were reverted.
+  ///
+  /// Each key affected gets back its value from before those operations, or
+  /// the value of a later operation not reverted. Unlike [rollback], which
+  /// discards every operation after a version, whoever made it. That's what
+  /// separates concurrent writers (e.g. transactions) sharing this map:
+  ///
+  /// ```dart
+  /// m['a'] = 1;           // version 1
+  /// m['a'] = 2;           // version 2: by writer A
+  /// m['b'] = 9;           // version 3: by writer B (kept)
+  /// m.revertVersions([2]); // writer A aborts
+  /// // m: {a: 1, b: 9}
+  /// ```
+  ///
+  /// - The writer records its versions: [version] right after each of its
+  ///   operations (a [remove] too). An operation over several keys
+  ///   ([addAll], [addEntries], [updateAll], [removeWhere], [clear]) uses one
+  ///   version per key changed: all the versions after [version] before it,
+  ///   up to [version] after it.
+  /// - [keys], if given, are the only keys searched for [versions] (the keys
+  ///   the writer changed). Otherwise every key is searched.
+  /// - The [version] doesn't change: a version is never used again, so the
+  ///   versions recorded by other writers stay valid. (Except after a
+  ///   [rollback], for the versions after its target.)
+  /// - A version no longer in the history is skipped: already reverted,
+  ///   discarded by a [rollback], never used (`0` or less too), or a
+  ///   [remove] left with nothing before it by a revert (dropped then: there
+  ///   was nothing to remove).
+  /// - A version before [revertibleVersion] (but after `0`) can't be
+  ///   reverted (its previous entries may have been consolidated): a
+  ///   [StateError], before anything is reverted.
+  /// - A [rollback] to a reverted version gives the state from before it.
+  int revertVersions(Iterable<int> versions, {Iterable<K>? keys}) {
+    var targetVersions = versions is Set<int> ? versions : versions.toSet();
+    if (targetVersions.isEmpty) return 0;
+
+    // All checked before reverting anything. A version of `0` or less was
+    // never used (the first operation is `1`): not in the history, skipped.
+    for (var ver in targetVersions) {
+      if (ver > 0 && ver <= _zeroVersion) {
+        throw StateError(
+            "Can't revert version $ver: consolidated (`revertibleVersion`: $revertibleVersion).");
+      }
+    }
+
+    var reverted = 0;
+    var minFirstVersionChanged = false;
+    List<K>? emptyKeys;
+
+    /// Reverts [targetVersions] in [key]'s history ([values]), for the loops
+    /// below: removes their entries, then keeps [_size], [_dirtyKeys] and
+    /// [_minFirstVersion] in step (as [consolidate] needs them), and collects
+    /// a key left with no entry in `emptyKeys`, removed after the loops.
+    void revertKey(K key, List<_MapEntry<K, V>> values) {
+      var length = values.length;
+      if (length == 0) return;
+
+      var wasLive = !values.last.isDeleted;
+      var firstVersion = values.first.version;
+
+      values.removeWhere((e) => targetVersions.contains(e.version));
+
+      var removed = length - values.length;
+      if (removed == 0) return;
+      reverted += removed;
+
+      // Leading deletions have nothing before them to delete: dropped (the
+      // key is absent either way). Not only a single one: a revert can
+      // leave several (`[del, del]`). A deletion after another one is kept:
+      // it still deletes whatever a later revert may leave before it.
+      while (values.isNotEmpty && values.first.isDeleted) {
+        values.removeAt(0);
+      }
+
+      var isLive = values.isNotEmpty && !values.last.isDeleted;
+      if (wasLive != isLive) {
+        _size += isLive ? 1 : -1;
+      }
+
+      // The same rules as [consolidate]'s:
+      if (values.isEmpty) {
+        (emptyKeys ??= <K>[]).add(key);
+        _dirtyKeys.remove(key);
+      } else if (values.length > 1 || values.first.isDeleted) {
+        _dirtyKeys.add(key);
+      } else {
+        _dirtyKeys.remove(key);
+      }
+
+      if (firstVersion == _minFirstVersion &&
+          (values.isEmpty || values.first.version != firstVersion)) {
+        minFirstVersionChanged = true;
+      }
+    }
+
+    if (keys != null) {
+      for (var key in keys) {
+        var values = _entries[key];
+        if (values != null) revertKey(key, values);
+      }
+    } else {
+      for (var e in _entries.entries) {
+        revertKey(e.key, e.value);
+      }
+    }
+
+    // Removed after the loop: not while iterating [_entries].
+    var emptyKeysList = emptyKeys;
+    if (emptyKeysList != null) {
+      for (var key in emptyKeysList) {
+        _entries.remove(key);
+      }
+    }
+
+    // Unknown now: [consolidate] computes it again when it needs it.
+    if (minFirstVersionChanged) {
+      _minFirstVersion = null;
+    }
+
+    return reverted;
   }
 
   void _clearAll() {
@@ -468,16 +625,21 @@ class MapHistory<K, V> implements Map<K, V> {
     _clearAll();
   }
 
-  /// Removes all history prior to [targetBaseVersion] and returns the consolidated [baseVersion].
-  /// After the operation it won't allow a [rollback] to a version prior to [targetBaseVersion].
+  /// Removes all history prior to [targetBaseVersion] and returns the
+  /// consolidated [baseVersion]. The entries (the map's content) don't
+  /// change.
+  ///
+  /// After it, a [rollback] to a version prior to [targetBaseVersion] is not
+  /// allowed (it clears the map), and [revertVersions] can't revert them. A
+  /// [targetBaseVersion] after the current [version] removes all the
+  /// history: only the current entries are kept.
   int consolidate(int targetBaseVersion) {
     if (targetBaseVersion <= _zeroVersion) {
       return baseVersion;
     } else if (targetBaseVersion > version) {
-      var ver = version;
-      _clearAll();
-      _zeroVersion = _version = ver;
-      return baseVersion;
+      // All the history: as consolidating to the next version (it used to
+      // clear the map, its entries included).
+      targetBaseVersion = version + 1;
     }
 
     // Only the dirty keys can change: every other key has a single live
@@ -494,11 +656,15 @@ class MapHistory<K, V> implements Map<K, V> {
 
       var firstVersion = values.first.version;
 
-      while (values.length > 2 && values.first.version < targetBaseVersion) {
-        values.removeAt(0);
-      }
-
-      if (values.length == 2 && values.last.version < targetBaseVersion) {
+      // Kept: the entry in effect at [targetBaseVersion] (the last one
+      // before it) and every later one. An entry is removed only when the
+      // next one is also before [targetBaseVersion]: so every kept entry
+      // from [targetBaseVersion] on still has its previous entry, for a
+      // [rollback] to a version from there, or a [revertVersions]. (It used
+      // to remove a first entry whenever there were more than 2, even when
+      // the next one was after [targetBaseVersion]: a rollback to
+      // [targetBaseVersion] then lost that key.)
+      while (values.length >= 2 && values[1].version < targetBaseVersion) {
         values.removeAt(0);
       }
 
@@ -532,6 +698,14 @@ class MapHistory<K, V> implements Map<K, V> {
     var minimalVersion = version;
     if (minFirstVersion != null && minFirstVersion < minimalVersion) {
       minimalVersion = minFirstVersion;
+    }
+
+    // Not before [targetBaseVersion]: a key may keep an entry from before it
+    // (the one in effect there), but the history before it is gone, so a
+    // rollback there could give a wrong state. (It used to be only the
+    // minimal first version, which allowed that.)
+    if (minimalVersion < targetBaseVersion) {
+      minimalVersion = targetBaseVersion;
     }
 
     _zeroVersion = minimalVersion - 1;

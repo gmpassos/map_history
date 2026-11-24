@@ -53,6 +53,28 @@ Rollback to version: 3
 Version: 3 >> {1: a, 2: b, 3: c}
 ```
 
+### Reverting only some operations
+
+`rollback` discards every operation after a version, whoever made it. When
+several writers share the map (e.g. concurrent transactions), each one can
+record its own versions and revert only them with `revertVersions`. The other
+writers' operations are kept, even on the same keys:
+
+```dart
+var m = MapHistory<String, int>();
+
+m['k'] = 0;
+
+m['k'] = 1; // writer A
+var a = [m.version];
+
+m['k'] = 2; // writer B
+m['j'] = 9; // writer B
+
+m.revertVersions(a, keys: ['k']); // writer A aborts
+print(m); // {k: 2, j: 9}: B's writes stay
+```
+
 ## See Also
 
 [Dart Map][dart_map] documentation.
